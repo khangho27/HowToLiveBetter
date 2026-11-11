@@ -45,7 +45,7 @@ class DigestTests(unittest.TestCase):
                   'summary': 'Put your phone away while concentrating. The evidence comes from short laboratory tasks.'} for e in entries]
         self.assertEqual(app.validate_summaries(valid, entries), valid)
         bad = json.loads(json.dumps(valid))
-        bad[0]['summary'] = 'x' * 361
+        bad[0]['summary'] = 'x' * 601
         with self.assertRaises(ValueError):
             app.validate_summaries(bad, entries)
         bad[0]['summary'] = '中文'
@@ -54,6 +54,30 @@ class DigestTests(unittest.TestCase):
         bad[0]['id'] = 'wrong'
         with self.assertRaises(ValueError):
             app.validate_summaries(bad, entries)
+
+    def test_long_but_discord_safe_title_is_preserved(self):
+        entries = self.entries[:3]
+        value = [{'id': e['id'], 'title': 'Keep important limitations when translating longer advice titles into English',
+                  'summary': 'Act on the advice only in its stated context. Preserve its limitations.'} for e in entries]
+        self.assertGreater(len(value[0]['title']), 70)
+        self.assertEqual(app.validate_summaries(value, entries), value)
+        payload = app.make_payload(entries, value, '2026-11-11', 'owner/repo', 'abc123')
+        self.assertIn(value[0]['title'], payload['embeds'][0]['fields'][0]['name'])
+
+    def test_invalid_translation_retries_once_without_posting_to_discord(self):
+        entries = self.entries[:3]
+        valid = [{'id': e['id'], 'title': 'A short title', 'summary': 'A complete summary with a caveat.'} for e in entries]
+        invalid = json.loads(json.dumps(valid))
+        invalid[0]['title'] = 'x' * 201
+        response = lambda value: {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': json.dumps(value)}]}
+        with patch.object(app, 'post_json', side_effect=[response(invalid), response(valid)]) as request:
+            self.assertEqual(app.translate(entries, 'fake-key', 'fake-model'), valid)
+            self.assertEqual(request.call_count, 2)
+            self.assertTrue(all(call.args[0] == 'https://api.anthropic.com/v1/messages' for call in request.call_args_list))
+        with patch.object(app, 'post_json', return_value=response(invalid)) as request:
+            with self.assertRaises(ValueError):
+                app.translate(entries, 'fake-key', 'fake-model')
+            self.assertEqual(request.call_count, 2)
 
     def test_payload_has_exact_sources_and_no_pings(self):
         entries = self.entries[:3]
