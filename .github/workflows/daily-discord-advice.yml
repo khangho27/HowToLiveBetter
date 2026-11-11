@@ -1,0 +1,61 @@
+name: Daily English Advice
+
+on:
+  schedule:
+    - cron: '0 8 * * *'
+      timezone: America/Los_Angeles
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'tools/discord/**'
+      - '.github/workflows/daily-discord-advice.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-discord-advice
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m unittest discover -s tools/discord -p 'test_*.py'
+      - run: python tools/discord/daily_advice.py --list-only
+
+  send:
+    if: github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Restore recent delivery history
+        uses: actions/cache/restore@v4
+        with:
+          path: .daily-advice/history.json
+          key: daily-advice-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: daily-advice-v1-
+      - name: Translate and deliver three tips
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          ADVICE_MODEL: ${{ vars.ADVICE_MODEL }}
+        run: python tools/discord/daily_advice.py
+      - name: Save delivery history
+        uses: actions/cache/save@v4
+        with:
+          path: .daily-advice/history.json
+          key: daily-advice-v1-${{ github.run_id }}-${{ github.run_attempt }}
