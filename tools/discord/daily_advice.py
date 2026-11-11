@@ -95,10 +95,15 @@ def validate_summaries(value, entries):
     if [v.get('id') for v in value if isinstance(v, dict)] != expected:
         raise ValueError('Translation IDs do not match the selected source entries.')
     for item in value:
-        for field, limit in [('title', 70), ('summary', 360)]:
+        # Prompt limits are editorial targets; allow safe headroom before retrying.
+        # Never trim a summary: its last sentence may contain a necessary caveat.
+        for field, limit in [('title', 200), ('summary', 600)]:
             text = item.get(field)
-            if not isinstance(text, str) or not text.strip() or len(text) > limit:
-                raise ValueError(f'Translation {field} is empty or too long.')
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"Entry {item['id']}: translation {field} is empty.")
+            length = len(text.encode('utf-16-le')) // 2
+            if length > limit:
+                raise ValueError(f"Entry {item['id']}: translation {field} has {length} characters (limit {limit}).")
             if re.search(r'[\u3400-\u9fff]|https?://|<@|@everyone|@here', text):
                 raise ValueError('Translation must be English text without links or mentions.')
     return value
@@ -116,17 +121,28 @@ def translate(entries, key, model):
         'Prefer omitting study numbers to making misleading abbreviations. Do not include links, '
         'Markdown, mentions, or Chinese. This is a translation, not independent verification.'
     )
-    result = post_json('https://api.anthropic.com/v1/messages', {
-        'model': model, 'max_tokens': 1800, 'temperature': 0,
-        'system': system,
-        'messages': [{'role': 'user', 'content': json.dumps(
-            [{'id': e['id'], 'source': e['text']} for e in entries], ensure_ascii=False)}]
-    }, {'x-api-key': key, 'anthropic-version': '2023-06-01'})
-    if result.get('stop_reason') != 'end_turn':
-        raise ValueError('Translation did not finish; no Discord message was sent.')
-    raw = ''.join(b['text'] for b in result.get('content', []) if b.get('type') == 'text').strip()
-    raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
-    return validate_summaries(json.loads(raw), entries)
+    feedback = ''
+    for attempt in range(2):
+        result = post_json('https://api.anthropic.com/v1/messages', {
+            'model': model, 'max_tokens': 1800, 'temperature': 0,
+            'system': system + feedback,
+            'messages': [{'role': 'user', 'content': json.dumps(
+                [{'id': e['id'], 'source': e['text']} for e in entries], ensure_ascii=False)}]
+        }, {'x-api-key': key, 'anthropic-version': '2023-06-01'})
+        try:
+            if result.get('stop_reason') != 'end_turn':
+                raise ValueError('Translation did not finish; no Discord message was sent.')
+            raw = ''.join(b['text'] for b in result.get('content', []) if b.get('type') == 'text').strip()
+            raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw)
+            return validate_summaries(json.loads(raw), entries)
+        except ValueError:
+            if attempt == 1:
+                raise
+            print('Translation formatting failed validation; trying once more before any Discord post.')
+            feedback = (' Your previous response failed format validation. Rewrite from the original '
+                        'entries with exactly the id, title, summary keys. Keep titles under 70 '
+                        'characters and summaries under 360 characters, preserving essential caveats. '
+                        'Return only valid JSON in English.')
 
 
 def make_payload(entries, summaries, today, repository, revision):
